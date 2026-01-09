@@ -97,6 +97,43 @@ ACCOUNTS = [
 
 def recognize_and_calculate(captcha_image_url: str, session: requests.Session) -> Optional[str]:
     """识别并计算验证码（线程安全）"""
+    
+    # 数字字符纠正映射表（用于操作数）
+    DIGIT_CORRECTIONS = {
+        'O': '0', 'o': '0',  # 字母O → 数字0
+        'D': '0', 'Q': '0',  # D/Q可能是0
+        'I': '1', 'i': '1', 'l': '1', '|': '1',  # I/l/竖线 → 数字1
+        'Z': '2', 'z': '2',  # 字母Z → 数字2
+        'S': '5', 's': '5',  # 字母S → 数字5
+        'G': '6', 'g': '6',  # 字母G → 数字6
+        'B': '8', 'b': '8',  # 字母B → 数字8
+    }
+    
+    # 运算符映射表（用于中间位置）
+    OPERATOR_CORRECTIONS = {
+        'T': '+', 't': '+',  # T → 加号
+        'I': '-', 'i': '-', '|': '-', '1': '-', 'l': '-',  # 竖线类 → 减号
+        'x': '×', 'X': '×',  # x/X → 乘号
+        '*': '×', '×': '×',  # 统一乘号
+        '÷': '/', ':': '/',  # 统一除号
+        '+': '+', '-': '-', '/': '/',  # 保留原有运算符
+    }
+    
+    def aggressive_digit_convert(text: str) -> str:
+        """激进的数字转换：尽可能把所有字符转为数字"""
+        result = []
+        for char in text:
+            if char.isdigit():
+                result.append(char)
+            elif char in DIGIT_CORRECTIONS:
+                result.append(DIGIT_CORRECTIONS[char])
+            elif char.upper() in DIGIT_CORRECTIONS:
+                result.append(DIGIT_CORRECTIONS[char.upper()])
+            else:
+                # 字母无法转换，保留原样
+                result.append(char)
+        return ''.join(result)
+    
     logger.info("正在处理验证码...")
     try:
         logger.debug("尝试自动识别验证码...")
@@ -133,67 +170,145 @@ def recognize_and_calculate(captcha_image_url: str, session: requests.Session) -
         with ocr_lock:
             text = ocr.classification(processed_bytes).strip()
         
-        logger.debug(f"OCR 识别文本: {text}")
+        logger.debug(f"OCR 原始识别: {text}")
 
-        # 预处理：去除空格、大小写统一（右边字母转大写）
-        raw_text = text.strip()
-        text = raw_text.replace(' ', '').upper()  # 上面的正则要用大写匹配
-
-        # 情况1：纯字母数字组合（没有运算符），直接返回原始识别文本（保留大小写）
-        if re.fullmatch(r'[A-Z0-9]+', text):
-            logger.info(f"检测到纯字母数字验证码: {raw_text}")
-            return raw_text.strip()  # 保留原始大小写返回
-
-        # 情况2：尝试解析四则运算
-        # 支持的运算符：+ - * × x X / ÷
-        pattern = r'^(\d+)([+\-*/×xX÷/])(\d+|[A-Z])$'
-        match = re.match(pattern, text)
-
-        if not match:
-            logger.warning(f"无法解析验证码格式（非纯字母数字也非运算式）: {raw_text}")
-            return raw_text.strip()  # 还是返回原始文本，交给上层处理或重试
-
-        left_str, op, right_str = match.groups()
-        left = int(left_str)
-
-        # 处理右边：数字或字母（A=10 ... Z=35）
-        if right_str.isdigit():
+        # 预处理：去除空格
+        raw_text = text.strip().replace(' ', '')
+        text_len = len(raw_text)
+        
+        logger.info(f"验证码长度: {text_len}, 内容: {raw_text}")
+        
+        # ===== 情况1：长度 >= 6，按纯字母数字验证码处理 =====
+        if text_len >= 6:
+            logger.info(f"检测到 >= 6 位验证码，按纯字母数字处理: {raw_text}")
+            return raw_text.upper()  # 统一大写返回
+        
+        # ===== 情况2：长度 < 6，按运算验证码处理 =====
+        logger.info(f"检测到 < 6 位验证码，按运算验证码处理: {raw_text}")
+        
+        # 尝试多种解析策略
+        # 策略1：标准3位格式 (数字 运算符 数字)
+        if text_len == 3:
+            left_char, mid_char, right_char = raw_text[0], raw_text[1], raw_text[2]
+            
+            # 左右转数字，中间转运算符
+            left_corrected = DIGIT_CORRECTIONS.get(left_char, left_char)
+            right_corrected = DIGIT_CORRECTIONS.get(right_char, right_char)
+            op_char = OPERATOR_CORRECTIONS.get(mid_char, mid_char)
+            
+            logger.debug(f"3位纠正: '{left_char}'→'{left_corrected}' '{mid_char}'→'{op_char}' '{right_char}'→'{right_corrected}'")
+            
+            if left_corrected.isdigit() and right_corrected.isdigit():
+                result = calculate_operation(int(left_corrected), op_char, int(right_corrected), raw_text)
+                if result is not None:
+                    return result
+        
+        # 策略2：正则匹配运算表达式（支持多位数）
+        # 先进行字符纠正
+        corrected_text = raw_text
+        for old, new in DIGIT_CORRECTIONS.items():
+            corrected_text = corrected_text.replace(old, new)
+        
+        # 匹配模式：数字 + 运算符 + 数字
+        pattern = r'^(\d+)([+\-×*/÷:xX])(\d+)$'
+        match = re.match(pattern, corrected_text)
+        
+        if match:
+            left_str, op, right_str = match.groups()
+            op = OPERATOR_CORRECTIONS.get(op, op)  # 运算符纠正
+            
+            left = int(left_str)
             right = int(right_str)
-        else:  # 一定是单个大写字母（因为正则限制了）
-            if 'A' <= right_str <= 'Z':
-                right = ord(right_str) - ord('A') + 10
-            else:
-                logger.warning(f"右边字符无效: {right_str}")
-                return raw_text.strip()
+            
+            logger.debug(f"正则匹配成功: {left} {op} {right}")
+            result = calculate_operation(left, op, right, raw_text)
+            if result is not None:
+                return result
+        
+        # 策略3：激进纠正 - 强制把所有非数字转为数字，再尝试解析
+        logger.warning(f"常规解析失败，尝试激进纠正...")
+        aggressive_text = aggressive_digit_convert(raw_text)
+        logger.debug(f"激进纠正结果: {raw_text} → {aggressive_text}")
+        
+        # 如果纠正后全是数字，尝试按位置推断运算符
+        if aggressive_text.isdigit() and len(aggressive_text) >= 3:
+            # 假设：倒数第二位可能是被误识别的运算符
+            # 例如："253" 可能是 "2+3"（中间的5被误识别）
+            if len(aggressive_text) == 3:
+                left = int(aggressive_text[0])
+                right = int(aggressive_text[2])
+                # 尝试常见运算符
+                for op in ['+', '-', '×', '/']:
+                    result = calculate_operation(left, op, right, raw_text, silent=True)
+                    if result is not None and 0 <= int(result) <= 20:  # 结果在合理范围
+                        logger.info(f"激进推断成功: {left} {op} {right} = {result}")
+                        return result
+        
+        # 策略4：如果还有字母，再次尝试强制转换
+        if not aggressive_text.isdigit():
+            logger.warning(f"包含无法转换的字符: {aggressive_text}")
+            # 最后尝试：移除所有非数字非运算符字符
+            cleaned = re.sub(r'[^0-9+\-×*/÷]', '', corrected_text)
+            match = re.match(r'^(\d+)([+\-×*/÷])(\d+)$', cleaned)
+            if match:
+                left_str, op, right_str = match.groups()
+                result = calculate_operation(int(left_str), op, int(right_str), raw_text)
+                if result is not None:
+                    logger.info(f"清理后解析成功: {cleaned}")
+                    return result
+        
+        # 所有策略都失败，返回原始文本
+        logger.warning(f"所有解析策略均失败，返回原始文本: {raw_text}")
+        return raw_text
+        
+    except Exception as e:
+        logger.error(f"验证码识别发生错误: {e}", exc_info=True)
+        return None
 
-        # 根据运算符计算
-        if op in {'*', '×', 'X', 'x'}:
-            result = left * right
-            op_name = '乘'
-        elif op == '+':
+
+def calculate_operation(left: int, op: str, right: int, raw_text: str, silent: bool = False) -> Optional[str]:
+    """
+    执行运算并返回结果
+    silent: 是否静默模式（不输出日志，用于批量尝试）
+    """
+    try:
+        if op == '+':
             result = left + right
             op_name = '加'
         elif op == '-':
             result = left - right
             op_name = '减'
-        elif op in {'/', '÷'}:
+        elif op in {'×', '*', 'x', 'X'}:
+            result = left * right
+            op_name = '乘'
+        elif op in {'/', '÷', ':'}:
             if right == 0:
-                logger.warning("除数为0，无法计算")
-                return raw_text.strip()
-            if left % right != 0:  # 如果不是整除，很多网站会拒绝非整数答案
-                logger.warning(f"除法非整除: {left} ÷ {right} = {left / right}")
-                return raw_text.strip()
+                if not silent:
+                    logger.warning("除数为0，无法计算")
+                return None
+            if left % right != 0:
+                if not silent:
+                    logger.warning(f"除法非整除: {left} ÷ {right} = {left / right}")
+                return None
             result = left // right
             op_name = '除'
         else:
-            logger.warning(f"未知运算符: {op}")
-            return raw_text.strip()
-
-        logger.info(f"验证码计算: {left} {op_name} {right_str} = {result}")
+            if not silent:
+                logger.warning(f"未知运算符: {op}")
+            return None
+        
+        if not silent:
+            logger.info(f"验证码计算: {left} {op_name} {right} = {result}")
         return str(result)
     except Exception as e:
-        logger.error(f"验证码识别错误发生错误: {e}", exc_info=True)
+        if not silent:
+            logger.error(f"计算错误: {e}")
         return None
+
+
+
+
+
 
 
 def get_euserv_pin(email: str, email_password: str, imap_server: str) -> Optional[str]:
