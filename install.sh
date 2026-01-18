@@ -561,18 +561,53 @@ uninstall() {
     
     if [[ $confirm == "y" || $confirm == "Y" ]]; then
         echo "正在卸载..."
-        systemctl stop euserv-renew.timer
-        systemctl disable euserv-renew.timer
-        rm -f /etc/systemd/system/euserv-renew.service
-        rm -f /etc/systemd/system/euserv-renew.timer
+        
+        # 停止并禁用服务
+        if systemctl list-unit-files | grep -q "euserv-renew.timer"; then
+            systemctl stop euserv-renew.timer 2>/dev/null
+            systemctl disable euserv-renew.timer 2>/dev/null
+            echo "✓ 已停止定时器服务"
+        fi
+        
+        if systemctl list-unit-files | grep -q "euserv-renew.service"; then
+            systemctl stop euserv-renew.service 2>/dev/null
+            systemctl disable euserv-renew.service 2>/dev/null
+            echo "✓ 已停止执行服务"
+        fi
+        
+        # 删除服务文件
+        if [ -f /etc/systemd/system/euserv-renew.service ]; then
+            rm -f /etc/systemd/system/euserv-renew.service
+            echo "✓ 已删除服务文件"
+        fi
+        
+        if [ -f /etc/systemd/system/euserv-renew.timer ]; then
+            rm -f /etc/systemd/system/euserv-renew.timer
+            echo "✓ 已删除定时器文件"
+        fi
+        
         systemctl daemon-reload
         
-        cd ${INSTALL_DIR}
-        docker-compose down -v 2>/dev/null
+        # 停止并删除Docker容器
+        if [ -d "${INSTALL_DIR}" ]; then
+            if [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
+                cd ${INSTALL_DIR}
+                docker-compose down -v 2>/dev/null && echo "✓ 已停止Docker容器"
+            fi
+            
+            rm -rf ${INSTALL_DIR}
+            echo "✓ 已删除安装目录"
+        else
+            echo "! 安装目录不存在，跳过"
+        fi
         
-        rm -rf ${INSTALL_DIR}
-        rm -f /usr/local/bin/euserv
+        # 删除快捷命令
+        if [ -f /usr/local/bin/dj ]; then
+            rm -f /usr/local/bin/dj
+            echo "✓ 已删除快捷命令"
+        fi
         
+        echo ""
         echo "卸载完成!"
         exit 0
     else
@@ -590,16 +625,24 @@ EOF
 # 安装主函数
 install() {
     print_info "开始安装EUserv自动续期服务..."
+    echo ""
     
     # 检查是否已安装
-    if [ -d "${INSTALL_DIR}" ]; then
-        print_warning "检测到已安装,是否重新安装? (y/N)"
-        read -r reinstall
-        if [[ ! $reinstall =~ ^[Yy]$ ]]; then
+    if [ -d "${INSTALL_DIR}" ] || [ -f "${COMMAND_LINK}" ] || systemctl list-unit-files | grep -q "euserv-renew"; then
+        print_warning "检测到已安装的组件:"
+        [ -d "${INSTALL_DIR}" ] && echo "  - 安装目录: ${INSTALL_DIR}"
+        [ -f "${COMMAND_LINK}" ] && echo "  - 快捷命令: ${COMMAND_LINK}"
+        systemctl list-unit-files | grep -q "euserv-renew" && echo "  - 系统服务: euserv-renew"
+        echo ""
+        read -p "是否先卸载后重新安装? (y/N): " reinstall
+        if [[ $reinstall =~ ^[Yy]$ ]]; then
+            uninstall_service
+            echo ""
+            print_info "继续安装..."
+        else
             print_info "取消安装"
             exit 0
         fi
-        uninstall_service
     fi
     
     # 执行安装步骤
@@ -623,6 +666,7 @@ install() {
     setup_cron $run_hour
     create_command
     
+    echo ""
     print_success "========================================="
     print_success "EUserv自动续期服务安装完成!"
     print_success "========================================="
@@ -631,6 +675,9 @@ install() {
     print_info "  dj                - 打开管理面板"
     print_info "  systemctl status euserv-renew.timer - 查看定时器状态"
     print_success "========================================="
+    echo ""
+    print_info "提示: 如果遇到Docker权限问题，请运行 'dj' 选择选项8进行修复"
+    echo ""
 }
 
 # 卸载函数
@@ -638,25 +685,49 @@ uninstall_service() {
     print_info "开始卸载EUserv自动续期服务..."
     
     # 停止并禁用服务
-    systemctl stop ${SERVICE_NAME}.timer 2>/dev/null
-    systemctl disable ${SERVICE_NAME}.timer 2>/dev/null
+    if systemctl list-unit-files | grep -q "euserv-renew.timer"; then
+        systemctl stop ${SERVICE_NAME}.timer 2>/dev/null
+        systemctl disable ${SERVICE_NAME}.timer 2>/dev/null
+        print_info "已停止定时器服务"
+    fi
+    
+    if systemctl list-unit-files | grep -q "euserv-renew.service"; then
+        systemctl stop ${SERVICE_NAME}.service 2>/dev/null
+        systemctl disable ${SERVICE_NAME}.service 2>/dev/null
+        print_info "已停止执行服务"
+    fi
     
     # 删除服务文件
-    rm -f /etc/systemd/system/${SERVICE_NAME}.service
-    rm -f /etc/systemd/system/${SERVICE_NAME}.timer
+    if [ -f /etc/systemd/system/${SERVICE_NAME}.service ]; then
+        rm -f /etc/systemd/system/${SERVICE_NAME}.service
+        print_info "已删除服务文件"
+    fi
+    
+    if [ -f /etc/systemd/system/${SERVICE_NAME}.timer ]; then
+        rm -f /etc/systemd/system/${SERVICE_NAME}.timer
+        print_info "已删除定时器文件"
+    fi
+    
     systemctl daemon-reload
     
     # 停止并删除Docker容器
-    if [ -f "${COMPOSE_FILE}" ]; then
-        cd ${INSTALL_DIR}
-        docker-compose down -v 2>/dev/null
+    if [ -d "${INSTALL_DIR}" ]; then
+        if [ -f "${COMPOSE_FILE}" ]; then
+            cd ${INSTALL_DIR}
+            docker-compose down -v 2>/dev/null
+            print_info "已停止Docker容器"
+        fi
+        
+        # 删除安装目录
+        rm -rf ${INSTALL_DIR}
+        print_info "已删除安装目录"
     fi
     
-    # 删除安装目录
-    rm -rf ${INSTALL_DIR}
-    
     # 删除快捷命令
-    rm -f ${COMMAND_LINK}
+    if [ -f ${COMMAND_LINK} ]; then
+        rm -f ${COMMAND_LINK}
+        print_info "已删除快捷命令"
+    fi
     
     print_success "卸载完成!"
 }
