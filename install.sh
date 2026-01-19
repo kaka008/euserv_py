@@ -867,32 +867,35 @@ EOF
 }
 
 # 选择运行模式
+# 选择运行模式
 choose_run_mode() {
-    echo ""
-    print_info "请选择运行模式:"
-    echo ""
-    echo "1. Docker容器模式"
-    echo "   优点: 环境隔离，依赖管理方便"
-    echo "   缺点: 需要一定的磁盘空间和资源"
-    echo "   推荐: 配置较高的VPS (2GB+ 内存)"
-    echo ""
-    echo "2. 本地Python模式"
-    echo "   优点: 资源占用少，启动快"
-    echo "   缺点: 依赖直接安装在系统上"
-    echo "   推荐: 配置较低的VPS (512MB-1GB 内存)"
-    echo ""
-    read -p "请选择运行模式 [1/2]: " mode_choice
+    # 所有的 echo 和 print_info 后面都加上 >&2
+    echo "" >&2
+    print_info "请选择运行模式:" >&2
+    echo "" >&2
+    echo "1. Docker容器模式" >&2
+    echo "   优点: 环境隔离，依赖管理方便" >&2
+    echo "   缺点: 需要一定的磁盘空间和资源" >&2
+    echo "   推荐: 配置较高的VPS (2GB+ 内存)" >&2
+    echo "" >&2
+    echo "2. 本地Python模式" >&2
+    echo "   优点: 资源占用少，启动快" >&2
+    echo "   缺点: 依赖直接安装在系统上" >&2
+    echo "   推荐: 配置较低的VPS (512MB-1GB 内存)" >&2
+    echo "" >&2
     
+    read -p "请选择运行模式 [1/2]: " mode_choice
+
     case $mode_choice in
         1)
-            echo "docker"
+            echo "docker"   
             ;;
         2)
-            echo "python"
+            echo "python"   
             ;;
         *)
-            print_warning "无效选择，默认使用Python模式"
-            echo "python"
+            print_warning "无效选择，默认使用Python模式" >&2
+            echo "python" 
             ;;
     esac
 }
